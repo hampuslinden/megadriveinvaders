@@ -1,0 +1,41 @@
+# --- C / ASM build artifacts ---
+
+# Final ROM and debug output
+*.sfc
+*.smc
+*.sym
+*.map
+
+# Compiler / assembler / linker intermediates
+*.o
+*.obj
+*.a
+*.lib
+*.elf
+*.bin
+*.out
+*.d
+*.lst
+*.ps
+*.asp
+*.rel
+src/*.asm
+linkfile
+
+# Generated graphics/data (regenerated from source images by gfx4snes)
+*.pic
+*.pal
+*.inc
+*_data.as
+
+# Emulator/editor state
+*.szst-last
+*.szhistory
+*.data.szsnes/
+
+# Helper-script generated backup/source cache
+tools/sprites_src.bmp
+
+# Keep hand-written assembly tracked
+!hdr.asm
+!data.asm
