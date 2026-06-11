@@ -43,3 +43,12 @@ bullet_pal:
 bullet_palend:
 
 .ends
+
+; --- Gun-fire sound effect (BRR sample, snesbrr-encoded from res/gunshot.wav) ---
+.section ".robrr" superfree
+
+gunshot_brr:
+.incbin "res/gunshot.brr"
+gunshot_brrend:
+
+.ends
