@@ -6,15 +6,14 @@ Small SNES homebrew project built with PVSnesLib. The game ROM is generated as `
 
 - C for game logic in `src/main.c`
 - PVSnesLib for the SNES SDK and build rules
-- MSYS2 to provide the shell environment used for builds on Windows
+- GNU Make under a Linux or WSL shell
 - PVSnesLib graphics conversion tools during `make`
-- PowerShell helper scripts in `tools/` for regenerating source BMP art
+- Python helper scripts in `tools/` for regenerating source BMP art
 
 ## Project Layout
 
 - `src/main.c`: main game code
 - `Makefile`: build rules and graphics conversion steps
-- `build.sh`: Windows-friendly wrapper that sets `PVSNESLIB_HOME` and runs `make`
 - `tools/`: helper scripts to regenerate some sprite BMP assets
 - `*.bmp` / `pvsneslibfont.png`: authored source graphics used by the build
 - `*.pic`, `*.pal`, `*.inc`, `*_data.as`: generated SNES graphics data consumed by the game
@@ -22,39 +21,27 @@ Small SNES homebrew project built with PVSnesLib. The game ROM is generated as `
 
 ## Required Tools
 
-This repository assumes a Windows setup matching the current build scripts.
+The build targets a Linux or WSL shell with GNU Make.
 
-### 1. MSYS2
+### 1. PVSnesLib
 
-Expected location:
+Install PVSnesLib and set `PVSNESLIB_HOME` to point at it, using a Unix-style
+path. Add it to your shell profile (e.g. `~/.bashrc`) so every shell has it:
 
-```powershell
-C:/msys64
+```sh
+export PVSNESLIB_HOME=/opt/pvsneslib
 ```
 
-The README commands below use:
+The Makefile reads `PVSNESLIB_HOME` and stops with an error if it isn't set.
 
-```powershell
-C:/msys64/usr/bin/bash.exe
-```
-
-### 2. PVSnesLib
-
-Expected location:
-
-```powershell
-C:/tools/pvsneslib
-```
-
-The build expects `PVSNESLIB_HOME` to point there. The provided `build.sh` sets it automatically.
-
-### 3. PowerShell
+### 2. Python 3
 
 Needed to run the helper scripts in `tools/` that regenerate some BMP assets.
+They use only the standard library (no `pip install` required).
 
-### 4. SNES Emulator
+### 3. SNES Emulator
 
-Any emulator that can load `.sfc` ROMs should work. The local project notes target ZSNES on Windows.
+Any emulator that can load `.sfc` ROMs should work.
 
 ## Build Process
 
@@ -66,56 +53,45 @@ The build works in two stages:
 The Makefile target flow is:
 
 ```make
-all: bitmaps snesgame2.sfc
+all: artifacts snesgame2.sfc
 ```
 
+`artifacts` groups the asset-conversion steps (`bitmaps`, `musics`, `brrsound`).
 The `bitmaps` target regenerates SNES-ready graphics data from the source images:
 
 - `pvsneslibfont.png` -> `pvsneslibfont.pic`, `pvsneslibfont.pal`
 - `sprites.bmp` -> `sprites.pic`, `sprites.pal`
 - `enemy.bmp` -> `enemy.pic`, `enemy.pal`
+- `tac2.bmp` -> `tac2.pic`, `tac2.pal`
 - `bullet.bmp` -> `bullet.pic`, `bullet.pal`
 
 From those assets, the PVSnesLib build rules generate the final ROM.
 
 ## Build Commands
 
-### Recommended: use the wrapper script
-
-From PowerShell:
-
-```powershell
-& C:/msys64/usr/bin/bash.exe -lc "sh /c/dev/snesgame2/build.sh"
-```
-
-This script does the environment setup for you:
-
-- sets `PVSNESLIB_HOME=C:/tools/pvsneslib`
-- adds the PVSnesLib tools to `PATH`
-- changes into `/c/dev/snesgame2`
-- runs `make`
-
-### Clean build artifacts
-
-```powershell
-& C:/msys64/usr/bin/bash.exe -lc "sh /c/dev/snesgame2/build.sh clean"
-```
-
-### Alternative: build manually inside MSYS2
-
-If you want to invoke `make` directly, you need the same environment variables:
+With `PVSNESLIB_HOME` set (see Required Tools), build from the project directory:
 
 ```sh
-export PVSNESLIB_HOME=C:/tools/pvsneslib
-export PATH=$PVSNESLIB_HOME/devkitsnes/bin:$PVSNESLIB_HOME/devkitsnes/tools:$PATH
-cd /c/dev/snesgame2
 make
+```
+
+To rebuild just the converted assets without linking the ROM:
+
+```sh
+make artifacts
+```
+
+To remove all build output and generated asset data:
+
+```sh
+make clean
 ```
 
 ## Make Targets
 
-- `make`: build graphics, compile code, and produce `snesgame2.sfc`
-- `make clean`: remove build results and generated graphics outputs through the PVSnesLib clean rules
+- `make` / `make all`: convert assets, compile code, and produce `snesgame2.sfc`
+- `make artifacts`: convert source art/sound into SNES data, without linking the ROM
+- `make clean`: remove the ROM, build intermediates, and generated asset data through the PVSnesLib clean rules
 
 ## Asset Workflow
 
@@ -124,7 +100,8 @@ This project keeps source art in standard image formats and converts them during
 ### Source assets used by `make`
 
 - `sprites.bmp`: player sprite sheet
-- `enemy.bmp`: enemy sprite sheet
+- `enemy.bmp`: enemy sprite sheet (Genesis console; one hit to destroy)
+- `tac2.bmp`: tough enemy sprite (TAC-2 joystick; takes three hits to destroy)
 - `bullet.bmp`: bullet sprite
 - `pvsneslibfont.png`: font image
 
@@ -141,9 +118,9 @@ These generated files are already present in the repository, but they can be reg
 
 ## Helper Scripts
 
-The PowerShell scripts in `tools/` are not part of the normal `make` target. They are helper utilities for regenerating the source BMP files before running the build.
+The Python scripts in `tools/` are not part of the normal `make` target. They are helper utilities for regenerating the source BMP files before running the build. They share `tools/snesbmp.py` (a small standard-library helper that draws onto an indexed canvas and writes the 8bpp BMP), and they use only the Python standard library, so they run the same on Windows, Linux, and WSL.
 
-### `tools/make_player_bmp.ps1`
+### `tools/make_player_bmp.py`
 
 - Rebuilds `sprites.bmp`
 - Preserves an original backup at `tools/sprites_src.bmp`
@@ -151,11 +128,11 @@ The PowerShell scripts in `tools/` are not part of the normal `make` target. The
 
 Run it with:
 
-```powershell
-& ./tools/make_player_bmp.ps1
+```sh
+python3 tools/make_player_bmp.py
 ```
 
-### `tools/make_enemy_bmp.ps1`
+### `tools/make_enemy_bmp.py`
 
 - Generates `enemy.bmp`
 - Creates an 8bpp `32x32` enemy sprite with a fixed palette
@@ -163,19 +140,32 @@ Run it with:
 
 Run it with:
 
-```powershell
-& ./tools/make_enemy_bmp.ps1
+```sh
+python3 tools/make_enemy_bmp.py
 ```
 
-### `tools/make_bullet_bmp.ps1`
+### `tools/make_tac2_bmp.py`
+
+- Generates `tac2.bmp`
+- Creates an 8bpp `32x32` sprite of a Suncom TAC-2 arcade joystick (red ball-top stick, chrome shaft, black base with a red fire button)
+- Draws the art in the top-left `21x21` of the `32x32` cell so it lines up with the enemy hit-box
+- This is the tougher enemy: it takes three hits to destroy (a screen-clearing bomb still flattens it in one), descends more slowly, and is worth more points
+
+Run it with:
+
+```sh
+python3 tools/make_tac2_bmp.py
+```
+
+### `tools/make_bullet_bmp.py`
 
 - Generates `bullet.bmp`
 - Creates an 8bpp `8x8` bullet sprite with a small fixed palette
 
 Run it with:
 
-```powershell
-& ./tools/make_bullet_bmp.ps1
+```sh
+python3 tools/make_bullet_bmp.py
 ```
 
 After running any of these scripts, rebuild the project so the `.bmp` changes are converted into SNES asset data.
@@ -194,26 +184,27 @@ Other intermediate files such as object files, symbol files, and converted graph
 
 ### `PVSNESLIB_HOME` is not set
 
-If `make` fails immediately with a message about `PVSNESLIB_HOME`, use the provided wrapper command instead of running `make` directly, or export the variable manually before building.
+If `make` stops immediately with a message about `PVSNESLIB_HOME`, export the
+variable so it points at your PVSnesLib install (a Unix-style path), e.g.
+`export PVSNESLIB_HOME=/opt/pvsneslib`, and add it to your shell profile so it
+persists.
 
-### `bash.exe` or MSYS2 path not found
+### PVSnesLib path errors
 
-Install MSYS2 in `C:/msys64`, or adjust the commands in this README to match your installation path.
-
-### PVSnesLib not found
-
-Install PVSnesLib at `C:/tools/pvsneslib`, or update `build.sh` and your environment to match the actual location.
+`PVSNESLIB_HOME` must be a Unix-style path (PVSnesLib's build rules reject paths
+containing a backslash). Under WSL, point it at a Linux path or a `/mnt/c/...`
+mount, not a `C:\...` path.
 
 ### Asset changes do not appear in the ROM
 
 If you edited or regenerated a BMP or the font PNG, rebuild the ROM so the graphics conversion step runs again.
 
-## Typical Windows Workflow
+## Typical Workflow
 
-```powershell
-& ./tools/make_enemy_bmp.ps1
-& ./tools/make_bullet_bmp.ps1
-& C:/msys64/usr/bin/bash.exe -lc "sh /c/dev/snesgame2/build.sh"
+```sh
+python3 tools/make_enemy_bmp.py
+python3 tools/make_bullet_bmp.py
+make
 ```
 
-If you did not change the source art, only the build command is needed.
+If you did not change the source art, only `make` is needed.

@@ -1,5 +1,20 @@
+#---------------------------------------------------------------------------------
+# snesgame2 - PVSnesLib build (Linux / WSL)
+#
+# Requires PVSNESLIB_HOME to point at your PVSnesLib install. Set it once in your
+# shell profile (~/.bashrc), using a Unix-style path:
+#
+#     export PVSNESLIB_HOME=/opt/pvsneslib
+#
+# Targets:
+#   make            build everything (assets + ROM)  ->  snesgame2.sfc
+#   make all        same as `make`
+#   make artifacts  convert source art/sound into SNES data, without linking the ROM
+#   make clean      remove the ROM, build intermediates, and generated asset data
+#---------------------------------------------------------------------------------
+
 ifeq ($(strip $(PVSNESLIB_HOME)),)
-$(error "Please create an environment variable PVSNESLIB_HOME pointing at /c/tools/pvsneslib")
+$(error PVSNESLIB_HOME is not set. Point it at your PVSnesLib install with a Unix-style path, e.g. `export PVSNESLIB_HOME=/opt/pvsneslib`)
 endif
 
 # BEFORE including snes_rules:
@@ -8,56 +23,77 @@ endif
 AUDIOFILES := res/sfx.it
 export SOUNDBANK := res/soundbank
 
-include ${PVSNESLIB_HOME}/devkitsnes/snes_rules
+include $(PVSNESLIB_HOME)/devkitsnes/snes_rules
 
-# snes_rules' Windows lib-path math mangles the dir into a broken "C::\..."
-# (double colon) under MSYS, so the standard library objects get dropped from
-# the linkfile and the link fails. Point it straight at the forward-slash lib
-# dir, which both `ls` and wlalink.exe accept.
-LIBDIRSOBJSW := $(LIBDIRSOBJS)
-
-.PHONY: bitmaps musics brrsound all
-
-#---------------------------------------------------------------------------------
-# ROMNAME is used in snes_rules file
+# ROMNAME is used by snes_rules to name the linked ROM.
 export ROMNAME := snesgame2
 
 # smconv flags: -s strip, -o output, -V verbose, -b 5 = place the bank in ROM bank 5
 SMCONVFLAGS := -s -o $(SOUNDBANK) -V -b 5
-musics: $(SOUNDBANK).obj
 
-all: musics brrsound bitmaps $(ROMNAME).sfc
+.PHONY: all artifacts bitmaps musics brrsound clean
 
+#---------------------------------------------------------------------------------
+# Top-level targets
+#---------------------------------------------------------------------------------
+# Everything: convert the assets, then compile + link the ROM.
+all: artifacts $(ROMNAME).sfc
+
+# Just the converted SNES data: graphics, the sound bank, and the BRR sample.
+# Useful to refresh assets (or sanity-check conversions) without a full link.
+artifacts: bitmaps musics brrsound
+
+# The ROM embeds the converted assets, so make sure they exist before linking
+# (order-only: regenerated assets don't force a needless relink).
+$(ROMNAME).sfc: | artifacts
+
+# Remove build results and generated graphics/audio (rules from snes_rules).
 clean: cleanBuildRes cleanRom cleanGfx cleanAudio
 
 #---------------------------------------------------------------------------------
-# Convert the bundled console font (8x8 tiles) -> .pic + .pal
+# Graphics: convert source images -> .pic + .pal (+ .inc / _data.as)
+#---------------------------------------------------------------------------------
+# Bundled console font (8x8 tiles)
 pvsneslibfont.pic: pvsneslibfont.png
 	@echo convert font ... $(notdir $@)
 	$(GFXCONV) -s 8 -o 16 -u 16 -p -e 0 -i $<
 
-# Convert the 32x32 sprite sheet -> .pic + .pal (+ .inc / _data.as)
+# Player sprite sheet (32x32)
 sprites.pic: sprites.bmp
 	@echo convert sprite ... $(notdir $@)
 	$(GFXCONV) -s 32 -o 16 -u 16 -t bmp -i $<
 
-# Convert the 32x32 Sega Genesis enemy -> .pic + .pal
+# Sega Genesis enemy (32x32)
 enemy.pic: enemy.bmp
 	@echo convert enemy ... $(notdir $@)
 	$(GFXCONV) -s 32 -o 16 -u 16 -t bmp -i $<
 
-# Convert the 8x8 player bullet -> .pic + .pal
+# Player bullet (8x8)
 bullet.pic: bullet.bmp
 	@echo convert bullet ... $(notdir $@)
 	$(GFXCONV) -s 8 -o 16 -u 16 -t bmp -i $<
 
-bitmaps: pvsneslibfont.pic sprites.pic enemy.pic bullet.pic
+# Bomb power-up pickup (32x32)
+powerup.pic: powerup.bmp
+	@echo convert powerup ... $(notdir $@)
+	$(GFXCONV) -s 32 -o 16 -u 16 -t bmp -i $<
+
+# TAC-2 joystick, the tough 3-hit enemy (32x32)
+tac2.pic: tac2.bmp
+	@echo convert tac2 ... $(notdir $@)
+	$(GFXCONV) -s 32 -o 16 -u 16 -t bmp -i $<
+
+bitmaps: pvsneslibfont.pic sprites.pic enemy.pic bullet.pic powerup.pic tac2.pic
 
 #---------------------------------------------------------------------------------
+# Sound: music/effects bank (smconv) + gun-fire BRR sample (snesbrr)
+#---------------------------------------------------------------------------------
+musics: $(SOUNDBANK).obj
+
 # Gun-fire effect: snesbrr-encode the synthesized WAV into a BRR sample.
-# res/gunshot.wav is produced by tools/make_gunshot.js (Node) -- regenerate it
-# with `node tools/make_gunshot.js` when tweaking the sound; the build itself
-# only needs snesbrr so it has no Node dependency.
+# res/gunshot.wav is produced by tools/make_gunshot.py -- regenerate it with
+# `python3 tools/make_gunshot.py` when tweaking the sound; the build itself only
+# needs snesbrr, so it has no Python dependency.
 res/gunshot.brr: res/gunshot.wav
 	@echo convert gunshot wav -> brr ... $(notdir $@)
 	$(BRCONV) -e $< $@

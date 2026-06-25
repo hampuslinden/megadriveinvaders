@@ -23,6 +23,8 @@ export PVSNESLIB_HOME=/c/tools/pvsneslib   # if unset
 export PATH=$PVSNESLIB_HOME/devkitsnes/bin:$PVSNESLIB_HOME/devkitsnes/tools:$PATH
 ```
 
+Do not use node.js to build things, use python for tooling around graphics or sound assets. The build process relies on the PVSnesLib toolchain and Makefiles, not JavaScript-based tools.
+
 ## Building
 
 PVSnesLib projects use a `Makefile` that includes the SDK's `snes_rules`. From an MSYS2 shell in the project dir:

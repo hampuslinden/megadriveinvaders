@@ -44,6 +44,32 @@ bullet_palend:
 
 .ends
 
+; --- Bomb power-up graphics (generated from powerup.bmp by gfx4snes) ---
+.section ".ropowerup" superfree
+
+powerup_til:
+.incbin "powerup.pic"
+powerup_tilend:
+
+powerup_pal:
+.incbin "powerup.pal"
+powerup_palend:
+
+.ends
+
+; --- TAC-2 joystick enemy graphics (generated from tac2.bmp by gfx4snes) ---
+.section ".rotac2" superfree
+
+tac2_til:
+.incbin "tac2.pic"
+tac2_tilend:
+
+tac2_pal:
+.incbin "tac2.pal"
+tac2_palend:
+
+.ends
+
 ; --- Gun-fire sound effect (BRR sample, snesbrr-encoded from res/gunshot.wav) ---
 .section ".robrr" superfree
 

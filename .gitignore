@@ -36,6 +36,10 @@ linkfile
 # Helper-script generated backup/source cache
 tools/sprites_src.bmp
 
+# Python bytecode cache (helper scripts in tools/)
+__pycache__/
+*.pyc
+
 # Keep hand-written assembly tracked
 !hdr.asm
 !data.asm
