@@ -19,8 +19,12 @@ endif
 
 # BEFORE including snes_rules:
 # list every .it file (effects first, then any music) in AUDIOFILES so smconv
-# builds the soundbank, and point SOUNDBANK at where to emit it.
-AUDIOFILES := res/sfx.it
+# builds the soundbank, and point SOUNDBANK at where to emit it. sfx.it MUST
+# stay first -- smconv treats the first IT file as the shared effects bank and
+# bakes it into every module after it, so effects stay playable once a music
+# module is loaded (see res/summergames.it's recipe below and the
+# PVSnesLib audio/effectsandmusic example).
+AUDIOFILES := res/sfx.it res/summergames.it
 export SOUNDBANK := res/soundbank
 
 include $(PVSNESLIB_HOME)/devkitsnes/snes_rules
@@ -28,8 +32,9 @@ include $(PVSNESLIB_HOME)/devkitsnes/snes_rules
 # ROMNAME is used by snes_rules to name the linked ROM.
 export ROMNAME := snesgame2
 
-# smconv flags: -s strip, -o output, -V verbose, -b 5 = place the bank in ROM bank 5
-SMCONVFLAGS := -s -o $(SOUNDBANK) -V -b 5
+# smconv flags: -s strip, -o output, -V verbose, -b 5 = place the bank in ROM
+# bank 5, -f = check combined size against the 1st (effects) IT file.
+SMCONVFLAGS := -s -o $(SOUNDBANK) -V -b 5 -f
 
 .PHONY: all artifacts bitmaps musics brrsound clean
 
@@ -99,3 +104,10 @@ res/gunshot.brr: res/gunshot.wav
 	$(BRCONV) -e $< $@
 
 brrsound: res/gunshot.brr
+
+# Game-completion music: converted from the MIDI by tools/make_music_it.py
+# (smconv only accepts Impulse Tracker modules, not raw MIDI). Regenerate with
+# `python3 tools/make_music_it.py` when tweaking the MIDI or the converter.
+res/summergames.it: music/summergames.mid tools/make_music_it.py
+	@echo convert midi -> it ... $(notdir $@)
+	python3 tools/make_music_it.py

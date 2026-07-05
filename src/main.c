@@ -8,6 +8,7 @@
 
 ---------------------------------------------------------------------------------*/
 #include <snes.h>
+#include <string.h>             // strlen/memset, used to blank the credits crawl text
 
 #include "sprites.inc"          // player: sprites_til/_tilend, sprites_pal/_palend
 #include "enemy.inc"            // enemy:  enemy_til/_tilend,   enemy_pal/_palend
@@ -90,6 +91,8 @@ const unsigned char jingleNotes[] = {
 #define PLAYFIELD_TOP 24        // top 3 tile-rows (y 0..23) are the stats bar
 #define SCORE_PER_KILL 100
 #define TANK_SCORE    300       // a 3-hit TAC-2 joystick is worth triple a console
+#define WIN_SCORE     5000	// score that triggers the "game completed" screen;
+                                 // tune this down (e.g. 200) to reach it quickly for debugging
 #define TANK_HEALTH   3         // hits to destroy the tough enemy
 #define TANK_CHANCE   5         // ~1 in this many spawns is a tough enemy
 #define HURT_FRAMES   8         // brief flicker after a non-lethal hit
@@ -104,6 +107,24 @@ const unsigned char jingleNotes[] = {
                                 // so the catch box is the upper-left 16x16 of the cell.
 #define POWERUP_SPEED 1         // pixels/frame the dropped bomb falls
 #define PLAYER_FLASH_FRAMES 60  // ~1s of blink + invulnerability after a hit
+// SNES BG scroll registers only hold whole pixels, so any slow crawl is really a
+// "move 1px every few frames" stair-step -- a fixed "wait N frames" step makes
+// that stair-step as even as it can be, but a sub-pixel accumulator (mirroring
+// enemySpeed/enemyFrac's descent) allows non-integer average speeds too, so the
+// step spacing can alternate (e.g. 5,5,6,5,5,6 frames) instead of being locked
+// to a single whole-number gap -- marginally smoother for the same overall pace.
+#define CREDITS_SCROLL_SPEED 51        // 1/256ths of a px per frame (~1px every 5 frames)
+#define CREDITS_START_DELAY_FRAMES 90  // blank pause after the screen clears, before text appears
+#define WIN_PAUSE_FRAMES     30        // brief freeze right after the winning kill
+#define WIN_CONGRATS_FRAMES 300        // ~5s (60fps) the "CONGRATULATIONS" banner stays up
+#define WIN_PHASE_PAUSE     0          // frozen field, about to show the banner
+#define WIN_PHASE_CONGRATS  1          // "CONGRATULATIONS" banner is up
+#define WIN_PHASE_CREDITS   2          // screen cleared, credits crawling
+// MOD_SUMMERGAMES has no baked-in loop point (see tools/make_music_it.py --
+// its .it pattern data has no jump/break effect), so the game manually
+// restarts it once its known length has played out: 256 rows at
+// speed=3/tempo=160 (2.5*3/160 = 0.046875s/row) = 12s = 720 frames at 60fps.
+#define MUSIC_LOOP_FRAMES 720
 
 // Each gfx4snes 32x32 sprite is a 64-tile (0x400-word) block; lay them end to end.
 #define VRAM_PLAYER   0x0000
@@ -172,6 +193,19 @@ unsigned char lastLives = 0xFF;          // force first HUD draw
 unsigned char playerFlash = 0;           // >0 = recently hit: blinking + invulnerable
 unsigned char gameOver = 0;
 char livesStr[4];
+
+// --- Game-complete state ---
+// Reusing BG0 (the text/HUD layer) for the credits crawl: it's otherwise idle
+// once play is frozen, and hardware-scrolling it costs nothing per frame, just
+// like the BG2 starfield's scroll trick.
+unsigned char gameWon = 0;               // true once WIN_SCORE is reached
+unsigned char winPhase = WIN_PHASE_PAUSE;  // where we are in the win sequence
+unsigned short winTimer = 0;              // counts down frames within the current phase
+unsigned short creditsScroll = 0;        // BG0 vertical scroll offset for the crawl
+unsigned char creditsFrac = 0;           // sub-pixel accumulator for CREDITS_SCROLL_SPEED
+unsigned char creditsPause = 0;          // counts down CREDITS_START_DELAY_FRAMES before
+                                          // the crawl text is drawn and starts moving
+unsigned short musicFrame = 0;           // frames since MOD_SUMMERGAMES last (re)started
 
 // --- Bomb inventory ---
 unsigned char bombs = START_BOMBS;
@@ -370,6 +404,89 @@ void drawBombs(void)
     consoleDrawText(27, 1, bombStr);
 }
 
+// --- "Game completed" credits crawl -------------------------------------------
+// BG0's tilemap is a single wrapping 32x32-tile (256x256px) screen, the same
+// layout the BG2 starfield scrolls over. The block is drawn starting at row 1
+// (the topmost non-clipped row) so the first line sits right at the top edge
+// the moment it appears, then continuously nudging bgSetScroll down (like the
+// starfield's "falling" trick) drifts the whole block down the screen and
+// loops it through the blank rows below -- a classic scrolling-credits look
+// with no per-frame text redraw needed.
+#define NUM_CREDIT_LINES 7
+static const unsigned char creditRow[NUM_CREDIT_LINES] = { 1, 3, 6, 8, 10, 12, 15 };
+static const unsigned char creditCol[NUM_CREDIT_LINES] = { 4, 4, 11, 9, 5, 3, 7 };
+static const char *const creditText[NUM_CREDIT_LINES] = {
+    "Thank you for playing.",
+    "You completed the game.",
+    "Thanks to:",
+    "Hampus (coder)",
+    "Claude (actuall coder)",
+    "Terry (design & testing)",
+    "Please play again"
+};
+
+void drawCredits(void)
+{
+    unsigned char k;
+    for (k = 0; k < NUM_CREDIT_LINES; k++)
+        consoleDrawText(creditCol[k], creditRow[k], (char *)creditText[k]);
+}
+
+// Blank each credit line back out (same spot, spaces instead of text) so
+// nothing is left behind once the crawl ends and gameplay resumes.
+void eraseCredits(void)
+{
+    unsigned char k, len;
+    char blank[26];
+    for (k = 0; k < NUM_CREDIT_LINES; k++)
+    {
+        len = strlen(creditText[k]);
+        memset(blank, ' ', len);
+        blank[len] = '\0';
+        consoleDrawText(creditCol[k], creditRow[k], blank);
+    }
+}
+
+// Hide every gameplay sprite and the starfield, leaving just the flat sky
+// colour. Used both when the credits crawl begins and when the player skips
+// the whole win sequence early with START.
+void clearPlayfield(void)
+{
+    unsigned char i, j;
+    oamSetXY(OAM_PLAYER, 0, OFFSCREEN_Y);
+    for (i = 0; i < MAX_ENEMIES; i++) oamSetXY(OAM_ENEMY(i), 0, OFFSCREEN_Y);
+    for (j = 0; j < NUM_BULLETS; j++) oamSetXY(OAM_BULLET(j), 0, OFFSCREEN_Y);
+    oamSetXY(OAM_POWERUP, 0, OFFSCREEN_Y);
+    bgSetDisable(2);
+}
+
+// Wipe all round state and drop back into a fresh game -- shared by the
+// game-over and game-complete screens' "press START to restart" handling.
+void resetGame(short *px, short *py)
+{
+    unsigned char i, j;
+    score = 0;            lastScore = 0xFFFF;  // force HUD redraw
+    lives = START_LIVES;  lastLives = 0xFF;
+    bombs = START_BOMBS;  lastBombs = 0xFF;
+    playerFlash = 0;
+    powerupActive = 0;
+    killsSinceDrop = 0;   dropThreshold = 10;
+    *px = 112; *py = 170;                       // player back at the start
+    activeEnemies = START_ENEMIES;              // back to the gentle opening wave
+    nextEnemyScore = ENEMIES_PER_LEVEL;         // reset the difficulty ramp
+    for (i = 0; i < MAX_ENEMIES; i++)
+    {
+        enemyType[i]   = ENEMY_NORMAL;
+        enemyHealth[i] = 1;
+        enemyHurt[i]   = 0;
+        if (i < activeEnemies)
+            spawnEnemy(i);       // fresh active enemies (sets gfx/palette)
+        else
+            oamSet(OAM_ENEMY(i), 0, OFFSCREEN_Y, 2, 0, 0, GFX_ENEMY, 1);  // park the rest
+    }
+    for (j = 0; j < NUM_BULLETS; j++) bulletActive[j] = 0;
+}
+
 // Intro splash screen: title + a "START GAME" menu item over the drifting
 // starfield, with a looping marimba fanfare. Blocks until the player presses
 // START, then wipes its text so nothing bleeds into the playfield. Assumes the
@@ -431,6 +548,7 @@ int main(void)
     // do this before loading any sounds, as in the PVSnesLib likemario sample.
     spcAllocateSoundRegion(16);
     spcStop();
+    spcLoad(MOD_SFX);                              // effects bank (soundbank module 0)
     for (i = 0; i < NUM_SFX; i++) spcLoadEffect(i);
     // Register the gunshot BRR sample (vol 15, centre pan, pitch 4) as sound 0.
     spcSetSoundEntry(15, PAN_CENTER, 4,
@@ -541,29 +659,111 @@ int main(void)
         {
             if (down0 & KEY_START)
             {
-                score = 0;            lastScore = 0xFFFF;  // force HUD redraw
-                lives = START_LIVES;  lastLives = 0xFF;
-                bombs = START_BOMBS;  lastBombs = 0xFF;
-                playerFlash = 0;
-                powerupActive = 0;
-                killsSinceDrop = 0;   dropThreshold = 10;
-                x = 112; y = 170;                          // player back at the start
-                activeEnemies = START_ENEMIES;             // back to the gentle opening wave
-                nextEnemyScore = ENEMIES_PER_LEVEL;        // reset the difficulty ramp
-                for (i = 0; i < MAX_ENEMIES; i++)
-                {
-                    enemyType[i]   = ENEMY_NORMAL;
-                    enemyHealth[i] = 1;
-                    enemyHurt[i]   = 0;
-                    if (i < activeEnemies)
-                        spawnEnemy(i);     // fresh active enemies (sets gfx/palette)
-                    else
-                        oamSet(OAM_ENEMY(i), 0, OFFSCREEN_Y, 2, 0, 0, GFX_ENEMY, 1);  // park the rest
-                }
-                for (j = 0; j < NUM_BULLETS; j++) bulletActive[j] = 0;
                 consoleDrawText(11, 13, "         ");       // erase "GAME OVER"
                 consoleDrawText(10, 15, "           ");     // erase "PRESS START"
+                resetGame(&x, &y);
                 gameOver = 0;
+            }
+            spcProcess();
+            WaitForVBlank();
+            continue;
+        }
+
+        // Score hit WIN_SCORE: a short freeze, a "CONGRATULATIONS" banner, then
+        // the screen clears and the credits crawl until START is pressed.
+        if (gameWon)
+        {
+            if (down0 & KEY_START)
+            {
+                // Skip straight to a fresh round. Both erases are safe no-ops
+                // if that particular screen was never drawn in the first place.
+                consoleDrawText(8, 12, "               ");  // erase "CONGRATULATIONS"
+                eraseCredits();
+                creditsScroll = 0;
+                bgSetScroll(0, 0, 0);                       // BG0 back to its normal HUD position
+                consoleDrawText(1, 1, "SCORE");             // HUD labels were hidden for the crawl
+                consoleDrawText(13, 1, "LIVES");
+                consoleDrawText(21, 1, "BOMBS");
+                bgSetEnable(2);                             // bring the starfield back
+                // Loading a module wipes SPC RAM, so switch back to the effects
+                // bank and re-register everything exactly as at startup: the
+                // effect instruments, then the raw gunshot BRR sample.
+                spcStop();
+                spcLoad(MOD_SFX);
+                for (i = 0; i < NUM_SFX; i++) spcLoadEffect(i);
+                spcSetSoundEntry(15, PAN_CENTER, 4,
+                                 (u16)(&gunshot_brrend - &gunshot_brr), &gunshot_brr, &gunSound);
+                resetGame(&x, &y);
+                gameWon = 0;
+            }
+            else if (winPhase == WIN_PHASE_PAUSE)
+            {
+                // Brief freeze on the finishing frame before the banner appears.
+                if (winTimer > 0) winTimer--;
+                else
+                {
+                    consoleDrawText(8, 12, "CONGRATULATIONS");
+                    spcStop();
+                    spcLoad(MOD_SUMMERGAMES);
+                    spcPlay(0);
+                    musicFrame = 0;
+                    winPhase  = WIN_PHASE_CONGRATS;
+                    winTimer  = WIN_CONGRATS_FRAMES;
+                }
+            }
+            else if (winPhase == WIN_PHASE_CONGRATS)
+            {
+                // Banner stays up over the still-frozen field for ~5 seconds,
+                // then the screen clears and the crawl takes over. Keep timing
+                // the music through this phase too, so the loop restart (once
+                // WIN_PHASE_CREDITS is reached) lands at the right point.
+                musicFrame++;
+                if (winTimer > 0) winTimer--;
+                else
+                {
+                    consoleDrawText(8, 12, "               ");  // erase "CONGRATULATIONS"
+                    consoleDrawText(1, 1, "     ");   // hide the HUD so it doesn't scroll
+                    consoleDrawText(7, 1, "     ");   // with the credits (BG0 is shared)
+                    consoleDrawText(13, 1, "     ");
+                    consoleDrawText(19, 1, " ");
+                    consoleDrawText(21, 1, "     ");
+                    consoleDrawText(27, 1, " ");
+                    clearPlayfield();
+                    creditsScroll = 0;
+                    creditsPause  = CREDITS_START_DELAY_FRAMES;
+                    creditsFrac   = 0;
+                    winPhase      = WIN_PHASE_CREDITS;
+                }
+            }
+            else  // WIN_PHASE_CREDITS
+            {
+                // MOD_SUMMERGAMES has no baked-in loop point (see
+                // MUSIC_LOOP_FRAMES' comment), so restart it by hand once its
+                // known length has played out.
+                if (++musicFrame >= MUSIC_LOOP_FRAMES)
+                {
+                    musicFrame = 0;
+                    spcPlay(0);
+                }
+
+                // Blank pause first, then the crawl text is drawn once and
+                // starts drifting down. A sub-pixel accumulator (see
+                // CREDITS_SCROLL_SPEED) paces the 1px steps evenly.
+                if (creditsPause > 0)
+                {
+                    creditsPause--;
+                    if (creditsPause == 0) drawCredits();
+                }
+                else
+                {
+                    unsigned short acc = creditsFrac + (unsigned short)CREDITS_SCROLL_SPEED;
+                    if (acc >> 8)
+                    {
+                        creditsScroll -= 1;          // drift down, like the starfield's fall
+                        bgSetScroll(0, 0, creditsScroll);
+                    }
+                    creditsFrac = (unsigned char)(acc & 0xFF);
+                }
             }
             spcProcess();
             WaitForVBlank();
@@ -658,8 +858,23 @@ int main(void)
             }
         }
 
+        // --- Win check: score crossed WIN_SCORE (from a bullet kill above, or
+        //     the Y-bomb earlier this frame). The field stays visible, frozen,
+        //     for a short beat -- the win sequence's own state machine (see the
+        //     gameWon block above the movement code) handles the banner, the
+        //     screen clear, and the credits crawl from here. ---
+        if (!gameWon && score >= WIN_SCORE)
+        {
+            gameWon  = 1;
+            winPhase = WIN_PHASE_PAUSE;
+            winTimer = WIN_PAUSE_FRAMES;
+            sfxPowerup();                      // bright fanfare for winning
+        }
+
         // --- Collisions: player (21x21) vs enemy. Costs a life + flash; brief i-frames ---
-        if (playerFlash == 0)
+        // Skipped once gameWon just triggered above -- winning ends the round outright,
+        // so a same-frame hit can't also set gameOver and leave the two states tangled.
+        if (playerFlash == 0 && !gameWon)
         {
             for (i = 0; i < activeEnemies; i++)
             {
