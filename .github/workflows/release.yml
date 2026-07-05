@@ -1,0 +1,161 @@
+name: Release
+
+# Build the SNES ROM and publish it as a tagged GitHub Release.
+#
+# Two ways to trigger:
+#   1. Actions tab -> "Release" -> Run workflow, enter a semantic version
+#      (e.g. 1.2.3 or 1.2.3-rc.1). The workflow creates the tag for you.
+#   2. Push a semver tag yourself:  git tag v1.2.3 && git push origin v1.2.3
+#
+# Either way it installs the PVSnesLib toolchain + gcc, builds snesgame2.sfc,
+# and attaches the ROM to a GitHub Release named after the tag.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version, semantic versioning (e.g. 1.2.3 or 1.2.3-rc.1)"
+        required: true
+        type: string
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"      # v1.2.3
+      - "v[0-9]+.[0-9]+.[0-9]+-*"    # v1.2.3-rc.1 (pre-release)
+
+permissions:
+  contents: write   # needed to create the tag and the release
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  PVSNESLIB_VERSION: "4.5.0"
+  PVSNESLIB_ZIP: "pvsneslib_450_64b_linux.zip"
+  ROM_NAME: "snesgame2"
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Determine version and tag
+        id: ver
+        env:
+          # Passed through env (not inlined) to avoid shell-injection on the input.
+          EVENT_NAME: ${{ github.event_name }}
+          VERSION_INPUT: ${{ github.event.inputs.version }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            RAW="$VERSION_INPUT"
+          else
+            RAW="$GITHUB_REF_NAME"
+          fi
+          VERSION="${RAW#v}"   # strip an optional leading "v"
+
+          # SemVer 2.0.0 (MAJOR.MINOR.PATCH[-prerelease][+build])
+          SEMVER='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'
+          if ! [[ "$VERSION" =~ $SEMVER ]]; then
+            echo "::error::'$RAW' is not a valid semantic version (expected MAJOR.MINOR.PATCH[-prerelease][+build])."
+            exit 1
+          fi
+
+          TAG="v${VERSION}"
+          PRERELEASE=false
+          [[ "$VERSION" == *-* ]] && PRERELEASE=true
+
+          echo "version=$VERSION"       >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG"               >> "$GITHUB_OUTPUT"
+          echo "prerelease=$PRERELEASE" >> "$GITHUB_OUTPUT"
+          echo "Releasing $TAG (prerelease=$PRERELEASE)"
+
+      - name: Ensure tag does not already exist
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.ver.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" >/dev/null 2>&1; then
+            echo "::error::Tag ${TAG} already exists. Bump the version and try again."
+            exit 1
+          fi
+
+      - name: Checkout (with Git LFS assets)
+        uses: actions/checkout@v4
+        with:
+          lfs: true   # .bmp/.png/.wav/.mid source art is stored in LFS
+
+      - name: Install build dependencies (gcc, make, libpng, python)
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential make unzip wget libpng-dev python3
+
+      - name: Install PVSnesLib ${{ env.PVSNESLIB_VERSION }}
+        run: |
+          set -euo pipefail
+          wget -q "https://github.com/alekmaul/pvsneslib/releases/download/${PVSNESLIB_VERSION}/${PVSNESLIB_ZIP}" -O /tmp/pvsneslib.zip
+          mkdir -p "$HOME/pvsneslib-sdk"
+          unzip -q /tmp/pvsneslib.zip -d "$HOME/pvsneslib-sdk"
+
+          # Locate PVSNESLIB_HOME robustly (parent of devkitsnes/, wherever the zip put it).
+          RULES="$(find "$HOME/pvsneslib-sdk" -type f -name snes_rules -path '*devkitsnes*' | head -n1)"
+          if [ -z "$RULES" ]; then
+            echo "::error::Could not find devkitsnes/snes_rules in the PVSnesLib archive."
+            exit 1
+          fi
+          PVHOME="$(dirname "$(dirname "$RULES")")"
+
+          # Prebuilt toolchain binaries need the execute bit on Linux.
+          chmod -R +x "$PVHOME/devkitsnes/bin" "$PVHOME/devkitsnes/tools" 2>/dev/null || true
+
+          echo "PVSNESLIB_HOME=$PVHOME"        >> "$GITHUB_ENV"
+          echo "$PVHOME/devkitsnes/bin"        >> "$GITHUB_PATH"
+          echo "$PVHOME/devkitsnes/tools"      >> "$GITHUB_PATH"
+          echo "PVSNESLIB_HOME resolved to: $PVHOME"
+
+      - name: Build ROM
+        run: |
+          set -euo pipefail
+          make clean || true   # start from source; generated assets are not committed
+          make
+          test -f "${ROM_NAME}.sfc"
+          ls -l "${ROM_NAME}.sfc"
+
+      - name: Stage versioned ROM
+        id: rom
+        env:
+          TAG: ${{ steps.ver.outputs.tag }}
+        run: |
+          set -euo pipefail
+          OUT="${ROM_NAME}-${TAG}.sfc"
+          cp "${ROM_NAME}.sfc" "$OUT"
+          echo "path=$OUT" >> "$GITHUB_OUTPUT"
+
+      - name: Upload ROM as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ROM_NAME }}-${{ steps.ver.outputs.tag }}
+          path: ${{ steps.rom.outputs.path }}
+          if-no-files-found: error
+
+      - name: Create GitHub Release and tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.ver.outputs.tag }}
+          PRERELEASE: ${{ steps.ver.outputs.prerelease }}
+          ROM_PATH: ${{ steps.rom.outputs.path }}
+        run: |
+          set -euo pipefail
+          # gh release create makes the tag at the current commit if it doesn't
+          # exist yet (workflow_dispatch), or reuses an existing pushed tag.
+          FLAGS=()
+          [ "$PRERELEASE" = "true" ] && FLAGS+=(--prerelease)
+          gh release create "$TAG" \
+            --target "$GITHUB_SHA" \
+            --title "${ROM_NAME} ${TAG}" \
+            --generate-notes \
+            "${FLAGS[@]}" \
+            "$ROM_PATH"
